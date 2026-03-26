@@ -48,6 +48,6 @@ echo -e "\n3. Ejecutando el job de Spark nuevamente..."
 docker exec spark-master /opt/spark/bin/spark-submit /opt/spark/work-dir/spark_roles_abp.py
 
 echo -e "\n4. Descargando la gráfica actualizada a tu escritorio..."
-docker cp spark-master:/opt/spark/work-dir/comparacion_tiempos.png .
+docker cp spark-master:/opt/spark/work-dir/output/comparacion_tiempos.png .
 
 echo -e "\n¡Todo completado!"
