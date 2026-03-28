@@ -39,15 +39,19 @@ INFER
 
 
   echo "1. Asegurando que matplotlib/numpy están instalados en el contenedor nuevo..."
-docker exec -u root spark-master pip install matplotlib numpy || docker exec spark-master pip install matplotlib numpy
+docker exec -u root spark-master pip install matplotlib numpy
+docker exec spark-master pip install matplotlib numpy
 
 echo -e "\n2. Subiendo el archivo al contenedor..."
-docker cp spark_roles_abp.py spark-master:/opt/spark/work-dir/
+docker cp spark_comparacion_tiempos.py spark-master:/opt/spark/work-dir/
+docker cp student_productivity_distraction_dataset_20000.csv spark-master:/opt/spark/work-dir/
+
 
 echo -e "\n3. Ejecutando el job de Spark nuevamente..."
-docker exec spark-master /opt/spark/bin/spark-submit /opt/spark/work-dir/spark_roles_abp.py
+docker exec spark-master /opt/spark/bin/spark-submit /opt/spark/work-dir/spark_comparacion_tiempos.py
 
 echo -e "\n4. Descargando la gráfica actualizada a tu escritorio..."
-docker cp spark-master:/opt/spark/work-dir/output/comparacion_tiempos.png .
+docker cp spark-master:/opt/spark/work-dir/grafica_transformaciones.png .
+docker cp spark-master:/opt/spark/work-dir/grafica_acciones.png .
 
 echo -e "\n¡Todo completado!"
