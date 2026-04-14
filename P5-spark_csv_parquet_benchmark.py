@@ -9,6 +9,10 @@ from pyspark.sql.types import (
     FloatType,
     StringType,
 )
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
 
 
 # ---------------------------
@@ -67,12 +71,15 @@ def benchmark_source(source_name, load_df_fn):
     df, t_load = timed(load_df_fn)
 
     def run_query():
+        # Filtramos por genero para aprovechar el Partition Pruning
+        # y por stress_level/attendance como antes.
         return (
-            df.filter((F.col("stress_level") > 8) & (F.col("attendance_percentage") >= 80))
+            df.filter(F.col("gender") == "Female")
+            .filter((F.col("stress_level") > 8) & (F.col("attendance_percentage") >= 80))
             .agg(
+                F.sum("productivity_score").alias("sum_productivity"),
                 F.avg("productivity_score").alias("avg_productivity"),
                 F.avg("focus_score").alias("avg_focus"),
-                F.avg("final_grade").alias("avg_final_grade"),
             )
             .collect()[0]
         )
@@ -84,10 +91,66 @@ def benchmark_source(source_name, load_df_fn):
         "load_s": round(t_load, 6),
         "query_s": round(t_query, 6),
         "total_s": round(t_load + t_query, 6),
+        "sum_productivity": float(result_row["sum_productivity"]),
         "avg_productivity": float(result_row["avg_productivity"]),
         "avg_focus": float(result_row["avg_focus"]),
-        "avg_final_grade": float(result_row["avg_final_grade"]),
     }
+
+
+
+def generar_graficas(results, output_path):
+    print("\n[G] Generando graficas comparativas...")
+    
+    sources = [r['source'] for r in results]
+    load_times = [r['load_s'] for r in results]
+    query_times = [r['query_s'] for r in results]
+    total_times = [r['total_s'] for r in results]
+
+    x = np.arange(len(sources))
+    width = 0.25
+
+    plt.rcParams.update({
+        'figure.facecolor': '#1a1a2e',
+        'axes.facecolor': '#16213e',
+        'axes.edgecolor': '#e94560',
+        'axes.labelcolor': '#eaeaea',
+        'text.color': '#eaeaea',
+        'xtick.color': '#eaeaea',
+        'ytick.color': '#eaeaea',
+        'font.size': 10,
+    })
+
+    fig, ax = plt.subplots(figsize=(14, 7))
+    
+    rects1 = ax.bar(x - width, load_times, width, label='Carga (Load)', color='#0f3460', edgecolor='white')
+    rects2 = ax.bar(x, query_times, width, label='Consulta (Filter+Sum)', color='#e94560', edgecolor='white')
+    rects3 = ax.bar(x + width, total_times, width, label='Total', color='#53354a', alpha=0.7, edgecolor='white')
+
+    ax.set_ylabel('Tiempo (segundos)')
+    ax.set_title('Benchmark de Rendimiento: CSV vs Parquet vs Particionado\n(Incluye impacto de Snappy y Predicate Pushdown)', fontsize=14, fontweight='bold', pad=20)
+    ax.set_xticks(x)
+    ax.set_xticklabels(sources, rotation=15)
+    ax.legend()
+    ax.grid(axis='y', alpha=0.2, linestyle='--')
+
+    # Añadir valores sobre las barras
+    def autolabel(rects):
+        for rect in rects:
+            height = rect.get_height()
+            ax.annotate(f'{height:.3f}',
+                        xy=(rect.get_x() + rect.get_width() / 2, height),
+                        xytext=(0, 3), 
+                        textcoords="offset points",
+                        ha='center', va='bottom', fontsize=8)
+
+    autolabel(rects1)
+    autolabel(rects2)
+    autolabel(rects3)
+
+    plt.tight_layout()
+    file_name = os.path.join(output_path, "benchmark_formatos.png")
+    plt.savefig(file_name, dpi=150)
+    print(f"  ✅ Grafica guardada en: {file_name}")
 
 
 
@@ -127,26 +190,55 @@ def main():
     print(f"  Escritura Parquet plain:  {t_write_plain:.4f}s")
     print(f"  Escritura Parquet snappy: {t_write_snappy:.4f}s")
 
-    # 3) Benchmark CSV vs Parquet
-    print("\n[3/7] Comparando tiempos de carga + filtro + medias...")
+    # 3) Escribir Parquet particionado (Necesario para el benchmark posterior)
+    print("\n[3/7] Preparando archivos particionados...")
+    _, t_part_gender = timed(
+        lambda: df_csv.write.mode("overwrite").partitionBy("gender").parquet(PARQUET_PART_GENDER_PATH)
+    )
+    print(f"  Escritura partitionBy(gender): {t_part_gender:.4f}s")
+
+
+    # 4) Benchmark de rendimiento
+    print("\n[4/7] Comparando tiempos de carga + filtro + agregacion (Benchmark)...")
     results = []
 
+    # CSV
     results.append(
         benchmark_source(
             "csv",
             lambda: spark.read.csv(CSV_PATH, header=True, schema=schema),
         )
     )
+    # Parquet Plain
     results.append(
         benchmark_source(
             "parquet_plain",
             lambda: spark.read.parquet(PARQUET_PLAIN_PATH),
         )
     )
+    # Parquet Snappy (Con Pushdown Activado por defecto)
     results.append(
         benchmark_source(
             "parquet_snappy",
             lambda: spark.read.parquet(PARQUET_SNAPPY_PATH),
+        )
+    )
+    # Parquet Snappy SIN Predicate Pushdown (Para la comparacion en la grafica)
+    print("  [Extra] Midiendo Parquet SIN Predicate Pushdown...")
+    spark.conf.set("spark.sql.parquet.filterPushdown", "false")
+    results.append(
+        benchmark_source(
+            "parquet_no_pushdown",
+            lambda: spark.read.parquet(PARQUET_SNAPPY_PATH),
+        )
+    )
+    spark.conf.set("spark.sql.parquet.filterPushdown", "true") # Restaurar
+
+    # Parquet Particionado (Gender - baja cardinalidad)
+    results.append(
+        benchmark_source(
+            "parquet_part_gender",
+            lambda: spark.read.parquet(PARQUET_PART_GENDER_PATH),
         )
     )
 
@@ -156,22 +248,19 @@ def main():
             f"query={row['query_s']:.4f}s total={row['total_s']:.4f}s"
         )
 
-    # 4) Predicate pushdown en Parquet
-    print("\n[4/7] Predicate pushdown (revisar plan fisico):")
+    # 4.5) Predicate pushdown en Parquet (Verificacion)
+    print("\n[4.5/7] Verificacion de Predicate Pushdown (Snappy):")
     df_parquet = spark.read.parquet(PARQUET_SNAPPY_PATH)
     filtered = df_parquet.filter((F.col("stress_level") > 8) & (F.col("attendance_percentage") >= 80))
     filtered.explain(True)
 
-    # 5) Particionado y cardinalidad
-    print("\n[5/7] Particionado por baja vs alta cardinalidad...")
-    _, t_part_gender = timed(
-        lambda: df_csv.write.mode("overwrite").partitionBy("gender").parquet(PARQUET_PART_GENDER_PATH)
-    )
-    _, t_part_student = timed(
-        lambda: df_csv.write.mode("overwrite").partitionBy("student_id").parquet(PARQUET_PART_STUDENT_PATH)
-    )
-    print(f"  partitionBy(gender)     -> {t_part_gender:.4f}s")
-    print(f"  partitionBy(student_id) -> {t_part_student:.4f}s")
+    # 5) Particionado de alta cardinalidad (COMENTADO POR SEGURIDAD)
+    # Escribir 20.000 particiones individuales es extremadamente lento y no se recomienda en produccion.
+    print("\n[5/7] Probando particionado de ALTA cardinalidad... (Saltado para evitar demora excesiva)")
+    # _, t_part_student = timed(
+    #     lambda: df_csv.write.mode("overwrite").partitionBy("student_id").parquet(PARQUET_PART_STUDENT_PATH)
+    # )
+    # print(f"  partitionBy(student_id) -> {t_part_student:.4f}s")
 
     # 6) Schema merging
     print("\n[6/7] Schema merging demo...")
@@ -213,6 +302,12 @@ def main():
     # Persistir metricas principales
     metrics_df = spark.createDataFrame(results)
     metrics_df.coalesce(1).write.mode("overwrite").option("header", "true").csv(RESULTS_CSV_PATH)
+
+    # Generar Graficas
+    try:
+        generar_graficas(results, OUT_DIR)
+    except Exception as e:
+        print(f"  ⚠️ Error al generar graficas: {e}")
 
     print("\nResumen de metricas guardado en:")
     print(f"  {RESULTS_CSV_PATH}")
