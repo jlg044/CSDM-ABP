@@ -112,77 +112,48 @@ TARGET = "productivity_score"
 # FUNCIONES AUXILIARES
 # ─────────────────────────────────────────────────────────────────────────────
 
-def log_print(msg, file_path=None):
-    """Imprime en consola y opcionalmente en archivo"""
-    print(msg)
-    if file_path:
-        with open(file_path, 'a', encoding='utf-8') as f:
-            f.write(msg + "\n")
-
-
-def calculate_correlations(spark, df):
+def calculate_correlations_spark(spark, df_transformed, numeric_features):
     """
-    Calcula correlación de Pearson entre cada feature y la variable objetivo.
-    Retorna dataframe con columnas: feature, correlacion, abs_correlacion
+    Calcula correlación de Pearson usando Spark MLlib
     """
-    print("\n[*] Calculando correlaciones...")
+    print("\n[*] Calculando correlaciones con Spark MLlib...")
     
-    correlations_data = []
+    # Calcular matriz de correlación
+    correlation_matrix = Correlation.corr(df_transformed, "features_numeric").head()
     
-    # Para features numéricas: calcular correlación directa con Pandas
-    pandas_df = df.select(NUMERIC_FEATURES + [TARGET]).toPandas()
+    # Extraer correlaciones con target
+    corr_array = correlation_matrix[0].toArray()
     
-    for feature in NUMERIC_FEATURES:
-        corr = pandas_df[feature].corr(pandas_df[TARGET])
-        correlations_data.append({
+    # El último índice es el target
+    target_idx = len(numeric_features)
+    correlations = corr_array[target_idx][:-1]
+    
+    # Crear dataframe de correlaciones
+    corr_data = []
+    for i, feature in enumerate(numeric_features):
+        corr_data.append({
             'feature': feature,
-            'correlation': corr,
-            'abs_correlation': abs(corr)
+            'correlation': float(correlations[i]),
+            'abs_correlation': abs(float(correlations[i]))
         })
     
-    # Para features categóricas codificadas (gender_indexed)
-    # La correlación se calcula después de OneHotEncoding
-    corr_gender_female = pandas_df.assign(
-        gender_is_female=(pandas_df['gender'] == 'Female').astype(int)
-    )['gender_is_female'].corr(pandas_df[TARGET])
+    # Convertir a Spark DataFrame y ordenar
+    corr_spark_df = spark.createDataFrame(corr_data)
+    corr_sorted = corr_spark_df.orderBy(F.desc("abs_correlation"))
     
-    corr_gender_male = pandas_df.assign(
-        gender_is_male=(pandas_df['gender'] == 'Male').astype(int)
-    )['gender_is_male'].corr(pandas_df[TARGET])
-    
-    correlations_data.append({
-        'feature': 'gender_Female',
-        'correlation': corr_gender_female,
-        'abs_correlation': abs(corr_gender_female)
-    })
-    
-    correlations_data.append({
-        'feature': 'gender_Male',
-        'correlation': corr_gender_male,
-        'abs_correlation': abs(corr_gender_male)
-    })
-    
-    corr_df = pd.DataFrame(correlations_data)
-    corr_df = corr_df.sort_values('abs_correlation', ascending=False)
-    
-    return corr_df
+    return corr_sorted
 
 
-def select_top_features(corr_df, n=TOP_N_FEATURES):
-    """Selecciona TOP N features por correlación absoluta"""
-    return corr_df.head(n)
-
-
-def plot_correlations(corr_df):
-    """Genera gráfica de correlaciones"""
+def plot_correlations(corr_list):
+    """Genera gráfica de correlaciones desde lista de diccionarios"""
+    features = [item['feature'] for item in corr_list]
+    correlations = [item['correlation'] for item in corr_list]
+    
     plt.figure(figsize=(12, 8))
     
-    # Preparar datos
-    features_sorted = corr_df.sort_values('correlation')
-    colors = ['red' if x < 0 else 'green' for x in features_sorted['correlation']]
+    colors = ['red' if x < 0 else 'green' for x in correlations]
     
-    # Gráfica horizontal
-    plt.barh(features_sorted['feature'], features_sorted['correlation'], color=colors, alpha=0.7)
+    plt.barh(features, correlations, color=colors, alpha=0.7)
     plt.xlabel('Correlación con Productivity Score', fontsize=12, fontweight='bold')
     plt.ylabel('Feature', fontsize=12, fontweight='bold')
     plt.title('Correlación de Features con Variable Objetivo\n(Rojo=Negativa, Verde=Positiva)', 
@@ -195,16 +166,16 @@ def plot_correlations(corr_df):
     plt.close()
 
 
-def plot_top_features(top_corr_df):
+def plot_top_features(top_corr_list):
     """Genera gráfica de TOP N features"""
+    features = [item['feature'] for item in top_corr_list]
+    correlations = [item['correlation'] for item in top_corr_list]
+    
     plt.figure(figsize=(10, 6))
     
-    # Preparar datos
-    features_sorted = top_corr_df.sort_values('correlation')
-    colors = ['red' if x < 0 else 'green' for x in features_sorted['correlation']]
+    colors = ['red' if x < 0 else 'green' for x in correlations]
     
-    # Gráfica horizontal
-    plt.barh(features_sorted['feature'], features_sorted['correlation'], color=colors, alpha=0.8)
+    plt.barh(features, correlations, color=colors, alpha=0.8)
     plt.xlabel('Correlación con Productivity Score', fontsize=11, fontweight='bold')
     plt.ylabel('Feature', fontsize=11, fontweight='bold')
     plt.title(f'TOP {TOP_N_FEATURES} Features Seleccionados por Correlación', 
@@ -217,7 +188,7 @@ def plot_top_features(top_corr_df):
     plt.close()
 
 
-def generate_report(corr_df, top_corr_df):
+def generate_report(all_corr_list, top_corr_list):
     """Genera reporte textual de feature selection"""
     
     # Limpiar archivo anterior
@@ -230,7 +201,7 @@ def generate_report(corr_df, top_corr_df):
         f.write("="*80 + "\n\n")
         
         f.write(f"Variable Objetivo: {TARGET}\n")
-        f.write(f"Total de features analizadas: {len(corr_df)}\n")
+        f.write(f"Total de features analizadas: {len(all_corr_list)}\n")
         f.write(f"Features seleccionados (TOP N): {TOP_N_FEATURES}\n\n")
         
         # TOP features
@@ -238,9 +209,9 @@ def generate_report(corr_df, top_corr_df):
         f.write("TOP FEATURES SELECCIONADOS (por valor absoluto de correlación)\n")
         f.write("-"*80 + "\n\n")
         
-        for idx, row in top_corr_df.iterrows():
-            f.write(f"{idx+1}. {row['feature']:<30} | Correlación: {row['correlation']:>8.4f} | "
-                   f"Abs: {row['abs_correlation']:>7.4f}\n")
+        for idx, item in enumerate(top_corr_list, 1):
+            f.write(f"{idx}. {item['feature']:<30} | Correlación: {item['correlation']:>8.4f} | "
+                   f"Abs: {item['abs_correlation']:>7.4f}\n")
         
         f.write("\n" + "-"*80 + "\n")
         f.write("INTERPRETACIÓN\n")
@@ -251,27 +222,29 @@ def generate_report(corr_df, top_corr_df):
         f.write("• |Correlación| cercano a 0: Relación muy débil\n\n")
         
         # Estadísticas
+        correlations = [item['correlation'] for item in all_corr_list]
+        abs_correlations = [item['abs_correlation'] for item in all_corr_list]
+        
         f.write("ESTADÍSTICAS DE CORRELACIÓN\n")
         f.write("-"*80 + "\n\n")
-        f.write(f"Correlación máxima (positiva):  {corr_df['correlation'].max():>8.4f} - {corr_df.loc[corr_df['correlation'].idxmax(), 'feature']}\n")
-        f.write(f"Correlación mínima (negativa):  {corr_df['correlation'].min():>8.4f} - {corr_df.loc[corr_df['correlation'].idxmin(), 'feature']}\n")
-        f.write(f"Correlación media (absoluta):   {corr_df['abs_correlation'].mean():>8.4f}\n")
-        f.write(f"Desv. estándar (absoluta):      {corr_df['abs_correlation'].std():>8.4f}\n\n")
+        f.write(f"Correlación máxima (positiva):  {max(correlations):>8.4f}\n")
+        f.write(f"Correlación mínima (negativa):  {min(correlations):>8.4f}\n")
+        f.write(f"Correlación media (absoluta):   {sum(abs_correlations)/len(abs_correlations):>8.4f}\n\n")
         
         # Features positivos vs negativos
         f.write("CLASIFICACIÓN\n")
         f.write("-"*80 + "\n\n")
         
-        positive = corr_df[corr_df['correlation'] > 0]
-        negative = corr_df[corr_df['correlation'] < 0]
+        positive = [item for item in all_corr_list if item['correlation'] > 0]
+        negative = [item for item in all_corr_list if item['correlation'] < 0]
         
         f.write(f"Features CON correlación positiva (impactan positivamente): {len(positive)}\n")
-        for _, row in positive.sort_values('correlation', ascending=False).head(5).iterrows():
-            f.write(f"  • {row['feature']:<30} {row['correlation']:>8.4f}\n")
+        for item in sorted(positive, key=lambda x: x['correlation'], reverse=True)[:5]:
+            f.write(f"  • {item['feature']:<30} {item['correlation']:>8.4f}\n")
         
         f.write(f"\nFeatures CON correlación negativa (impactan negativamente): {len(negative)}\n")
-        for _, row in negative.sort_values('correlation').head(5).iterrows():
-            f.write(f"  • {row['feature']:<30} {row['correlation']:>8.4f}\n")
+        for item in sorted(negative, key=lambda x: x['correlation'])[:5]:
+            f.write(f"  • {item['feature']:<30} {item['correlation']:>8.4f}\n")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -307,66 +280,80 @@ def main():
         print("\nPrimeras 3 filas del dataset:")
         df.show(3, truncate=False)
         
-        # Calcular correlaciones
-        print("\n[3] Calculando correlaciones con variable objetivo...")
-        corr_df = calculate_correlations(spark, df)
+        # FILTRAR NULOS ANTES DE CALCULAR CORRELACIONES
+        print("\n[3] Filtrando valores nulos...")
+        df_no_null = df.dropna(subset=NUMERIC_FEATURES + [TARGET])
+        count_after = df_no_null.count()
+        print(f"✓ Registros después de filtrar nulos: {count_after} (removidos: {count - count_after})")
+        
+        # TRANSFORMACIÓN INICIAL: VectorAssembler para calcular correlaciones
+        print("\n[4] Preparando features para calcular correlaciones...")
+        
+        assembler_numeric = VectorAssembler(
+            inputCols=NUMERIC_FEATURES + [TARGET], 
+            outputCol="features_numeric"
+        )
+        df_with_vectors = assembler_numeric.transform(df_no_null)
+        
+        # Calcular correlaciones con Spark MLlib
+        print("\n[5] Calculando correlaciones con Spark MLlib...")
+        corr_sorted = calculate_correlations_spark(spark, df_with_vectors, NUMERIC_FEATURES)
+        
+        # Convertir a lista local para análisis
+        corr_list = corr_sorted.collect()
+        corr_list = [row.asDict() for row in corr_list]
         
         # Guardar correlaciones a CSV
-        corr_df.to_csv(CORRELATIONS_CSV, index=False)
+        corr_sorted.coalesce(1).write.csv(CORRELATIONS_CSV, header=True, mode="overwrite")
         print(f"✓ Correlaciones guardadas en: {CORRELATIONS_CSV}")
         
         print("\nTodas las correlaciones:")
-        print(corr_df.to_string())
+        print("─"*80)
+        for item in corr_list:
+            print(f"{item['feature']:<30} Correlación: {item['correlation']:>8.4f} | Abs: {item['abs_correlation']:>7.4f}")
         
         # Seleccionar TOP N
-        print(f"\n[4] Seleccionando TOP {TOP_N_FEATURES} features...")
-        top_corr_df = select_top_features(corr_df, n=TOP_N_FEATURES)
+        print(f"\n[6] Seleccionando TOP {TOP_N_FEATURES} features...")
+        top_corr_list = corr_list[:TOP_N_FEATURES]
         
         print(f"\n✓ TOP {TOP_N_FEATURES} Features Seleccionados:")
-        for idx, row in top_corr_df.iterrows():
-            print(f"  {idx+1}. {row['feature']:<30} Correlación: {row['correlation']:>8.4f}")
+        for idx, item in enumerate(top_corr_list, 1):
+            print(f"  {idx}. {item['feature']:<30} Correlación: {item['correlation']:>8.4f}")
         
         # Generar visualizaciones
-        print("\n[5] Generando visualizaciones...")
-        plot_correlations(corr_df)
-        plot_top_features(top_corr_df)
+        print("\n[7] Generando visualizaciones...")
+        plot_correlations(corr_list)
+        plot_top_features(top_corr_list)
         
         # Generar reporte
-        print("\n[6] Generando reporte...")
-        generate_report(corr_df, top_corr_df)
+        print("\n[8] Generando reporte...")
+        generate_report(corr_list, top_corr_list)
         print(f"✓ Reporte guardado en: {FEATURE_REPORT}")
         
-        # TRANSFORMACIÓN: StringIndexer + OneHotEncoder para gender
-        print("\n[7] Transformando features categóricas...")
+        # TRANSFORMACIÓN FINAL: StringIndexer + OneHotEncoder + StandardScaler con features seleccionados
+        print("\n[9] Transformando y normalizando features seleccionados...")
+        
+        selected_numeric_features = [item['feature'] for item in top_corr_list]
         
         indexer = StringIndexer(inputCol="gender", outputCol="gender_indexed")
-        encoder = OneHotEncoder(inputCol="gender_indexed", outputCol="gender_encoded")
+        encoder = OneHotEncoder(inputCol="gender_indexed", outputCol="gender_encoded", dropLast=False)
         
-        # Seleccionar features para VectorAssembler
-        top_numeric_features = top_corr_df[~top_corr_df['feature'].str.startswith('gender')]['feature'].tolist()
+        # VectorAssembler solo con TOP features
+        assembler_selected = VectorAssembler(
+            inputCols=selected_numeric_features,
+            outputCol="features_vector"
+        )
         
-        # Si gender está en TOP features, incluir gender_encoded
-        has_gender = any(top_corr_df['feature'].str.startswith('gender'))
-        
-        if has_gender:
-            assembler_inputs = top_numeric_features + ["gender_encoded"]
-        else:
-            assembler_inputs = top_numeric_features
-        
-        print(f"Features a usar en VectorAssembler: {assembler_inputs}")
-        
-        assembler = VectorAssembler(inputCols=assembler_inputs, outputCol="features_vector")
+        # StandardScaler
         scaler = StandardScaler(inputCol="features_vector", outputCol="features_scaled")
         
-        # Crear pipeline
-        pipeline = Pipeline(stages=[indexer, encoder, assembler, scaler])
-        
-        # Aplicar transformaciones
-        df_transformed = pipeline.fit(df).transform(df)
+        # Pipeline final
+        pipeline_final = Pipeline(stages=[indexer, encoder, assembler_selected, scaler])
+        df_final = pipeline_final.fit(df_no_null).transform(df_no_null)
         
         # Guardar datos transformados
-        print(f"\n[8] Guardando datos transformados...")
-        df_transformed.select("student_id", "productivity_score", "features_scaled").write \
+        print(f"\n[10] Guardando datos transformados...")
+        df_final.select("student_id", "productivity_score", "features_scaled").write \
             .parquet(TRANSFORMED_PARQUET, mode="overwrite")
         print(f"✓ Datos transformados guardados en: {TRANSFORMED_PARQUET}")
         
@@ -380,7 +367,7 @@ def main():
         print(f"  • Gráfica TOP features: {SELECTED_FEATURES_PLOT}")
         print(f"  • Reporte: {FEATURE_REPORT}")
         print(f"  • Datos transformados: {TRANSFORMED_PARQUET}")
-        print(f"\n✓ Features seleccionados: {TOP_N_FEATURES}/{len(corr_df)}")
+        print(f"\n✓ Features seleccionados: {TOP_N_FEATURES}/{len(corr_list)}")
         print(f"✓ Transformaciones aplicadas: StringIndexer, OneHotEncoder, VectorAssembler, StandardScaler")
         print("="*80 + "\n")
         
