@@ -1,5 +1,10 @@
 import os
 import time
+import matplotlib
+# Usamos Agg para que no de problemas al guardar la grafica en el servidor de Docker
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
@@ -9,28 +14,14 @@ from pyspark.sql.types import (
     FloatType,
     StringType,
 )
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import numpy as np
 
-
-# ---------------------------
-# Configuracion general
-# ---------------------------
+# Definimos las rutas para no tener que escribirlas cada vez
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(BASE_DIR, "student_productivity_distraction_dataset_20000.csv")
-OUT_DIR = os.path.join(BASE_DIR, "output", "p5_format_benchmark")
+OUT_DIR = os.path.join(BASE_DIR, "output", "p5_formal_benchmark")
+os.makedirs(OUT_DIR, exist_ok=True)
 
-PARQUET_PLAIN_PATH = os.path.join(OUT_DIR, "parquet_plain")
-PARQUET_SNAPPY_PATH = os.path.join(OUT_DIR, "parquet_snappy")
-PARQUET_PART_GENDER_PATH = os.path.join(OUT_DIR, "parquet_partition_gender")
-PARQUET_PART_STUDENT_PATH = os.path.join(OUT_DIR, "parquet_partition_student")
-PARQUET_MERGE_A_PATH = os.path.join(OUT_DIR, "schema_merge", "part_a")
-PARQUET_MERGE_B_PATH = os.path.join(OUT_DIR, "schema_merge", "part_b")
-RESULTS_CSV_PATH = os.path.join(OUT_DIR, "metricas_tiempos.csv")
-
-
+# Definimos el esquema a mano para que Spark no tenga que adivinarlo (va mas rapido)
 schema = StructType([
     StructField("student_id", IntegerType(), True),
     StructField("age", IntegerType(), True),
@@ -52,269 +43,139 @@ schema = StructType([
     StructField("productivity_score", FloatType(), True),
 ])
 
-
-
+# Pequeña funcion para medir tiempos sin repetir codigo
 def timed(fn):
     start = time.perf_counter()
     value = fn()
     end = time.perf_counter()
     return value, end - start
 
-
-
-def ensure_dirs():
-    os.makedirs(OUT_DIR, exist_ok=True)
-
-
-
-def benchmark_source(source_name, load_df_fn):
-    df, t_load = timed(load_df_fn)
-
-    def run_query():
-        # Filtramos por genero para aprovechar el Partition Pruning
-        # y por stress_level/attendance como antes.
-        return (
-            df.filter(F.col("gender") == "Female")
-            .filter((F.col("stress_level") > 8) & (F.col("attendance_percentage") >= 80))
-            .agg(
-                F.sum("productivity_score").alias("sum_productivity"),
-                F.avg("productivity_score").alias("avg_productivity"),
-                F.avg("focus_score").alias("avg_focus"),
-            )
-            .collect()[0]
-        )
-
-    result_row, t_query = timed(run_query)
-
-    return {
-        "source": source_name,
-        "load_s": round(t_load, 6),
-        "query_s": round(t_query, 6),
-        "total_s": round(t_load + t_query, 6),
-        "sum_productivity": float(result_row["sum_productivity"]),
-        "avg_productivity": float(result_row["avg_productivity"]),
-        "avg_focus": float(result_row["avg_focus"]),
-    }
-
-
-
-def generar_graficas(results, output_path):
-    print("\n[G] Generando graficas comparativas...")
-    
-    sources = [r['source'] for r in results]
-    load_times = [r['load_s'] for r in results]
-    query_times = [r['query_s'] for r in results]
-    total_times = [r['total_s'] for r in results]
-
-    x = np.arange(len(sources))
-    width = 0.25
-
-    plt.rcParams.update({
-        'figure.facecolor': '#1a1a2e',
-        'axes.facecolor': '#16213e',
-        'axes.edgecolor': '#e94560',
-        'axes.labelcolor': '#eaeaea',
-        'text.color': '#eaeaea',
-        'xtick.color': '#eaeaea',
-        'ytick.color': '#eaeaea',
-        'font.size': 10,
-    })
-
-    fig, ax = plt.subplots(figsize=(14, 7))
-    
-    rects1 = ax.bar(x - width, load_times, width, label='Carga (Load)', color='#0f3460', edgecolor='white')
-    rects2 = ax.bar(x, query_times, width, label='Consulta (Filter+Sum)', color='#e94560', edgecolor='white')
-    rects3 = ax.bar(x + width, total_times, width, label='Total', color='#53354a', alpha=0.7, edgecolor='white')
-
-    ax.set_ylabel('Tiempo (segundos)')
-    ax.set_title('Benchmark de Rendimiento: CSV vs Parquet vs Particionado\n(Incluye impacto de Snappy y Predicate Pushdown)', fontsize=14, fontweight='bold', pad=20)
-    ax.set_xticks(x)
-    ax.set_xticklabels(sources, rotation=15)
-    ax.legend()
-    ax.grid(axis='y', alpha=0.2, linestyle='--')
-
-    # Añadir valores sobre las barras
-    def autolabel(rects):
-        for rect in rects:
-            height = rect.get_height()
-            ax.annotate(f'{height:.3f}',
-                        xy=(rect.get_x() + rect.get_width() / 2, height),
-                        xytext=(0, 3), 
-                        textcoords="offset points",
-                        ha='center', va='bottom', fontsize=8)
-
-    autolabel(rects1)
-    autolabel(rects2)
-    autolabel(rects3)
-
-    plt.tight_layout()
-    file_name = os.path.join(output_path, "benchmark_formatos.png")
-    plt.savefig(file_name, dpi=150)
-    print(f"  ✅ Grafica guardada en: {file_name}")
-
-
-
 def main():
-    ensure_dirs()
-
+    # Creamos la sesion de Spark
     spark = (
         SparkSession.builder
-        .appName("P5CSVvsParquetSnappyPushdown")
+        .appName("Benchmark_CSV_vs_Parquet_Grupo")
         .master("local[*]")
         .config("spark.sql.shuffle.partitions", "8")
-        .config("spark.sql.warehouse.dir", os.path.join(OUT_DIR, "spark-warehouse"))
-        .enableHiveSupport()
         .getOrCreate()
     )
 
-    print("=" * 72)
-    print("P5 - CSV vs Parquet | Snappy | Predicate Pushdown | Particionado")
-    print("=" * 72)
-
-    if not os.path.exists(CSV_PATH):
-        raise FileNotFoundError(f"No se encontro el dataset: {CSV_PATH}")
-
-    # 1) Carga base CSV con schema explicito
-    print("\n[1/7] Cargando CSV base...")
-    df_csv, t_csv_read = timed(lambda: spark.read.csv(CSV_PATH, header=True, schema=schema))
-    print(f"  Tiempo lectura CSV inicial: {t_csv_read:.4f}s")
-
-    # 2) Escribir Parquet sin compresion y con Snappy
-    print("\n[2/7] Escribiendo Parquet (plain y snappy)...")
-    _, t_write_plain = timed(
-        lambda: df_csv.write.mode("overwrite").option("compression", "uncompressed").parquet(PARQUET_PLAIN_PATH)
-    )
-    _, t_write_snappy = timed(
-        lambda: df_csv.write.mode("overwrite").option("compression", "snappy").parquet(PARQUET_SNAPPY_PATH)
-    )
-    print(f"  Escritura Parquet plain:  {t_write_plain:.4f}s")
-    print(f"  Escritura Parquet snappy: {t_write_snappy:.4f}s")
-
-    # 3) Escribir Parquet particionado (Necesario para el benchmark posterior)
-    print("\n[3/7] Preparando archivos particionados...")
-    _, t_part_gender = timed(
-        lambda: df_csv.write.mode("overwrite").partitionBy("gender").parquet(PARQUET_PART_GENDER_PATH)
-    )
-    print(f"  Escritura partitionBy(gender): {t_part_gender:.4f}s")
-
-
-    # 4) Benchmark de rendimiento
-    print("\n[4/7] Comparando tiempos de carga + filtro + agregacion (Benchmark)...")
     results = []
 
-    # CSV
-    results.append(
-        benchmark_source(
-            "csv",
-            lambda: spark.read.csv(CSV_PATH, header=True, schema=schema),
-        )
-    )
-    # Parquet Plain
-    results.append(
-        benchmark_source(
-            "parquet_plain",
-            lambda: spark.read.parquet(PARQUET_PLAIN_PATH),
-        )
-    )
-    # Parquet Snappy (Con Pushdown Activado por defecto)
-    results.append(
-        benchmark_source(
-            "parquet_snappy",
-            lambda: spark.read.parquet(PARQUET_SNAPPY_PATH),
-        )
-    )
-    # Parquet Snappy SIN Predicate Pushdown (Para la comparacion en la grafica)
-    print("  [Extra] Midiendo Parquet SIN Predicate Pushdown...")
-    spark.conf.set("spark.sql.parquet.filterPushdown", "false")
-    results.append(
-        benchmark_source(
-            "parquet_no_pushdown",
-            lambda: spark.read.parquet(PARQUET_SNAPPY_PATH),
-        )
-    )
-    spark.conf.set("spark.sql.parquet.filterPushdown", "true") # Restaurar
+    # 1. Empezamos con el CSV original para tener una base
+    print("--- Cargando y probando CSV ---")
+    df_csv = spark.read.csv(CSV_PATH, header=True, schema=schema)
+    def query_csv():
+        # Filtramos por mujeres y sumamos su productividad
+        return df_csv.filter(F.col("gender") == "Female").agg(F.sum("productivity_score")).collect()[0]
+    _, t_csv = timed(query_csv)
+    results.append({"name": "CSV (Original)", "time": t_csv})
 
-    # Parquet Particionado (Gender - baja cardinalidad)
-    results.append(
-        benchmark_source(
-            "parquet_part_gender",
-            lambda: spark.read.parquet(PARQUET_PART_GENDER_PATH),
-        )
-    )
+    # 2. Convertimos a Parquet pelado (sin compresion nada)
+    print("--- Probando Parquet sin compresion ---")
+    path_plain = os.path.join(OUT_DIR, "plain.parquet")
+    df_csv.write.mode("overwrite").option("compression", "uncompressed").parquet(path_plain)
+    df_plain = spark.read.parquet(path_plain)
+    _, t_plain = timed(lambda: df_plain.filter(F.col("gender") == "Female").agg(F.sum("productivity_score")).collect()[0])
+    results.append({"name": "Parquet (Sin Compresion)", "time": t_plain})
 
-    for row in results:
-        print(
-            f"  {row['source']:<15} load={row['load_s']:.4f}s "
-            f"query={row['query_s']:.4f}s total={row['total_s']:.4f}s"
-        )
+    # 3. Ahora con Snappy, que es lo que se recomienda normalmente
+    print("--- Probando Snappy ---")
+    path_snappy = os.path.join(OUT_DIR, "snappy.parquet")
+    df_csv.write.mode("overwrite").option("compression", "snappy").parquet(path_snappy)
+    df_snappy = spark.read.parquet(path_snappy)
+    _, t_snappy = timed(lambda: df_snappy.filter(F.col("gender") == "Female").agg(F.sum("productivity_score")).collect()[0])
+    results.append({"name": "Snappy (Comprimido)", "time": t_snappy})
 
-    # 4.5) Predicate pushdown en Parquet (Verificacion)
-    print("\n[4.5/7] Verificacion de Predicate Pushdown (Snappy):")
-    df_parquet = spark.read.parquet(PARQUET_SNAPPY_PATH)
-    filtered = df_parquet.filter((F.col("stress_level") > 8) & (F.col("attendance_percentage") >= 80))
-    filtered.explain(True)
+    # 4. Probamos el Pushdown con baja cardinalidad (Genero)
+    print("--- Analizando Pushdown (Genero) ---")
+    spark.conf.set("spark.sql.parquet.filterPushdown", "true")
+    _, t_low_card = timed(lambda: df_snappy.filter(F.col("gender") == "Female").agg(F.sum("productivity_score")).collect()[0])
+    results.append({"name": "Pushdown (Baja Card.)", "time": t_low_card})
 
-    # 5) Particionado de alta cardinalidad (COMENTADO POR SEGURIDAD)
-    # Escribir 20.000 particiones individuales es extremadamente lento y no se recomienda en produccion.
-    print("\n[5/7] Probando particionado de ALTA cardinalidad... (Saltado para evitar demora excesiva)")
-    # _, t_part_student = timed(
-    #     lambda: df_csv.write.mode("overwrite").partitionBy("student_id").parquet(PARQUET_PART_STUDENT_PATH)
-    # )
-    # print(f"  partitionBy(student_id) -> {t_part_student:.4f}s")
+    # 5. Y ahora con mucha cardinalidad (IDs de estudiantes)
+    print("--- Analizando Pushdown (IDs) ---")
+    _, t_high_card = timed(lambda: df_snappy.filter(F.col("student_id") == 5000).agg(F.sum("productivity_score")).collect()[0])
+    results.append({"name": "Pushdown (Alta Card.)", "time": t_high_card})
 
-    # 6) Schema merging
-    print("\n[6/7] Schema merging demo...")
-    df_a = df_csv.filter(F.col("student_id") <= 10000)
-    df_b = df_csv.filter(F.col("student_id") > 10000).withColumn(
-        "score_compuesto", F.col("focus_score") + F.col("stress_level")
-    )
+    # 6. Particionado por genero (en carpetas separadas)
+    print("--- Haciendo el particionado ---")
+    path_part = os.path.join(OUT_DIR, "partitioned")
+    df_csv.write.mode("overwrite").partitionBy("gender").parquet(path_part)
+    df_part = spark.read.parquet(path_part)
+    # Aqui se deberia notar mucha diferencia por el Partition Pruning
+    _, t_part = timed(lambda: df_part.filter(F.col("gender") == "Female").agg(F.sum("productivity_score")).collect()[0])
+    results.append({"name": "Particionado (Genero)", "time": t_part})
 
-    df_a.write.mode("overwrite").parquet(PARQUET_MERGE_A_PATH)
-    df_b.write.mode("overwrite").parquet(PARQUET_MERGE_B_PATH)
+    # 7. Schema Merging: juntamos dos trozos con esquemas algo distintos
+    print("--- Haciendo Schema Merging ---")
+    path_a = os.path.join(OUT_DIR, "merge_a")
+    path_b = os.path.join(OUT_DIR, "merge_b")
+    df_csv.limit(10000).write.mode("overwrite").parquet(path_a)
+    # A un trozo le añadimos una columna extra para forzar el merge
+    df_b_raw = df_csv.filter(F.col("student_id") > 10000).withColumn("extra_col", F.lit(1))
+    df_b_raw.write.mode("overwrite").parquet(path_b)
+    _, t_merge = timed(lambda: spark.read.option("mergeSchema", "true").parquet(path_a, path_b).count())
+    results.append({"name": "Schema Merging (Union)", "time": t_merge})
 
-    merged = spark.read.option("mergeSchema", "true").parquet(PARQUET_MERGE_A_PATH, PARQUET_MERGE_B_PATH)
-    print("  Esquema tras mergeSchema=true:")
-    merged.printSchema()
+    # 8. Bucketing (JOIN): esto es clave para optimizar cruces de tablas
+    print("--- Bucketing y Join ---")
+    import shutil
+    # Borramos la carpeta primero por si acaso, que si no Spark da fallo de LocationExists
+    warehouse_path = os.path.join(BASE_DIR, "spark-warehouse", "t_bucket")
+    if os.path.exists(warehouse_path):
+        shutil.rmtree(warehouse_path)
 
-    # 7) Bucketing (puede depender del entorno)
-    print("\n[7/7] Bucketing (opcional, enfocado a joins)...")
-    try:
-        spark.sql("DROP TABLE IF EXISTS p5_bucketed_students")
-        _, t_bucket = timed(
-            lambda: (
-                df_csv.write.mode("overwrite")
-                .bucketBy(8, "student_id")
-                .sortBy("student_id")
-                .saveAsTable("p5_bucketed_students")
-            )
-        )
-        print(f"  Tabla bucketed creada en {t_bucket:.4f}s")
+    spark.sql("DROP TABLE IF EXISTS t_bucket")
+    df_csv.write.mode("overwrite").bucketBy(8, "student_id").sortBy("student_id").saveAsTable("t_bucket")
+    def run_join():
+        t1 = spark.table("t_bucket")
+        t2 = spark.table("t_bucket")
+        return t1.join(t2, "student_id").count()
+    _, t_bucket = timed(run_join)
+    results.append({"name": "Bucketing (Join)", "time": t_bucket})
 
-        # Join de ejemplo para notar comportamiento
-        left = spark.table("p5_bucketed_students").select("student_id", "focus_score")
-        right = spark.table("p5_bucketed_students").select("student_id", "productivity_score")
+    # --- Generamos la grafica para la presentacion ---
+    print("\nCreando la grafica final...")
+    names = [r['name'] for r in results]
+    times = [r['time'] for r in results]
 
-        _, t_join = timed(lambda: left.join(right, on="student_id", how="inner").count())
-        print(f"  Join sobre tabla bucketed -> {t_join:.4f}s")
-    except Exception as ex:
-        print(f"  Aviso: bucketing no disponible o fallo de entorno: {str(ex).splitlines()[0]}")
+    plt.figure(figsize=(15, 9), facecolor='#1a1a2e')
+    ax = plt.gca()
+    ax.set_facecolor('#1a1a2e')
+    
+    # Usamos colores variados para que se diferencien bien las pruebas
+    colors = ['#ff4d4d', '#3498db', '#2ecc71', '#f1c40f', '#e67e22', '#9b59b6', '#1abc9c', '#3498db']
 
-    # Persistir metricas principales
-    metrics_df = spark.createDataFrame(results)
-    metrics_df.coalesce(1).write.mode("overwrite").option("header", "true").csv(RESULTS_CSV_PATH)
+    bars = plt.bar(names, times, color=colors, edgecolor='white', linewidth=1)
+    
+    plt.title("COMPARATIVA DE RENDIMIENTO: NUESTRAS PRUEBAS EN SPARK", fontsize=18, fontweight='bold', color='white', pad=35)
+    plt.suptitle("Benchmark de tiempos entre CSV, Parquet y optimizaciones (20k registros)", fontsize=12, color='#cccccc', y=0.92)
+    plt.ylabel("Segundos", color='white', fontsize=12)
+    
+    # Rotamos las etiquetas para que no se pisen entre ellas
+    plt.xticks(rotation=30, ha='right', color='white', fontsize=11, fontweight='bold')
+    plt.yticks(color='white')
+    plt.grid(axis='y', linestyle='--', alpha=0.1, color='white')
 
-    # Generar Graficas
-    try:
-        generar_graficas(results, OUT_DIR)
-    except Exception as e:
-        print(f"  ⚠️ Error al generar graficas: {e}")
+    # Ponemos el tiempo encima de cada barra para que se lea mejor
+    for bar in bars:
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2, height + (max(times)*0.01),
+                 f'{height:.4f}s', ha='center', va='bottom', 
+                 fontsize=10, fontweight='bold', color='white')
 
-    print("\nResumen de metricas guardado en:")
-    print(f"  {RESULTS_CSV_PATH}")
-
-    print("\nProceso completado.")
+    # Dejamos espacio abajo para los nombres
+    plt.subplots_adjust(bottom=0.3, top=0.85) 
+    
+    # Guardamos la imagen final para el reporte
+    save_path = os.path.join(OUT_DIR, "P5-grafica_final.png")
+    plt.savefig(save_path, dpi=200, facecolor='#1a1a2e', bbox_inches='tight')
+    
+    print(f"\nProceso terminado.")
+    print(f"La grafica la tienes aqui: {save_path}")
+    
     spark.stop()
-
 
 if __name__ == "__main__":
     main()
