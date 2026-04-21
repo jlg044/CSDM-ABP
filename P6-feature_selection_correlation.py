@@ -1,37 +1,61 @@
-# P6: Ingeniería de Características para CSDM
-# Mi dataset tiene 20.000 filas, uso el script para limpiar y preparar todo para ML
+"""
+=============================================================================
+  P6: BENCHMARK DE TIEMPO Y PRECISIÓN (R2)
+  Dataset: student_productivity_distraction_dataset_20000.csv
+=============================================================================
+"""
 
 import os
-import matplotlib.pyplot as plt
+import time
 from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, IntegerType, FloatType, StringType
 from pyspark.ml.feature import StringIndexer, OneHotEncoder, VectorAssembler, StandardScaler
+from pyspark.ml.regression import LinearRegression
+from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.ml import Pipeline
 
-# Rutas de los archivos (mejor usar paths relativos para que el profe no tenga fallos)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INPUT_PATH = os.path.join(BASE_DIR, "student_productivity_distraction_dataset_20000.csv")
-PLOT_PATH = os.path.join(BASE_DIR, "correlacion_features.png")
-SAMPLE_PATH = os.path.join(BASE_DIR, "MUESTRA_VECTORES.txt")
 
-# Esta funcion es para ver las correlaciones en una tabla por consola
-def ver_tabla_correlaciones(corrs):
-    print("\nTABLA DE RELEVANCIA (Feature Selection)")
-    print("-" * 50)
-    # Ordeno por valor absoluto para ver las que mas influyen (da igual si es + o -)
-    for nombre, valor in sorted(corrs, key=lambda x: abs(x[1]), reverse=True):
-        tipo = "POSITIVO" if valor > 0 else "NEGATIVO"
-        print(f"{nombre:<25} | {valor:>8.4f} | {tipo}")
-    print("-" * 50 + "\n")
+def benchmark_ml(df, lista_features, nombre_test):
+    """Entrena un modelo rapido y mide tiempo y precision"""
+    print(f"\n>>> Test: {nombre_test}")
+    inicio = time.time()
+    
+    # Pipeline
+    idx = StringIndexer(inputCol="gender", outputCol="gender_idx")
+    enc = OneHotEncoder(inputCol="gender_idx", outputCol="gender_vec")
+    ass = VectorAssembler(inputCols=lista_features + ["gender_vec"], outputCol="features_raw")
+    esc = StandardScaler(inputCol="features_raw", outputCol="features")
+    
+    # Entrenamos una Regresion Lineal rapida
+    lr = LinearRegression(featuresCol="features", labelCol="label")
+    
+    pipe = Pipeline(stages=[idx, enc, ass, esc, lr])
+    
+    # Dividimos en Train y Test (80/20)
+    train, test = df.randomSplit([0.8, 0.2], seed=42)
+    
+    # Entrenar
+    modelo = pipe.fit(train)
+    
+    # Predecir sobre test para ver precision
+    predicciones = modelo.transform(test)
+    
+    evaluador = RegressionEvaluator(labelCol="label", predictionCol="prediction", metricName="r2")
+    r2 = evaluador.evaluate(predicciones)
+    
+    fin = time.time()
+    tiempo = fin - inicio
+    
+    print(f"✓ Tiempo: {tiempo:.4f}s | R2 (Precision): {r2:.4f}")
+    return tiempo, r2
 
 def main():
-    # Iniciamos Spark (he bajado el log para que no salgan tantos avisos)
-    spark = SparkSession.builder.appName("Practica_P6_ML").getOrCreate()
+    spark = SparkSession.builder.appName("Precision_Benchmark_P6").getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
 
-    # Schema del dataset para que Spark no tenga que adivinarlo
-    mi_schema = StructType([
+    schema = StructType([
         StructField("student_id", IntegerType(), True),
         StructField("age", IntegerType(), True),
         StructField("gender", StringType(), True),
@@ -52,76 +76,31 @@ def main():
         StructField("productivity_score", FloatType(), True),
     ])
 
-    df = spark.read.schema(mi_schema).csv(INPUT_PATH, header=True)
-    
-    # --- PARTE 1: FEATURE SELECTION (CORRELACIONES) ---
-    cols_numericas = [c.name for c in df.schema.fields if isinstance(c.dataType, (FloatType, IntegerType)) 
-                      and c.name not in ["student_id", "productivity_score"]]
-    
-    # Calculo la correlacion de cada una con la productividad
-    correlaciones = []
-    for c in cols_numericas:
-        res = df.stat.corr(c, "productivity_score")
-        correlaciones.append((c, res))
-    
-    # Imprimo la tabla para la exposicion
-    ver_tabla_correlaciones(correlaciones)
-
-    # --- PARTE 2: GRAFICA DE IMPACTO ---
-    # Ordeno para que la grafica de barras se vea bien
-    corrs_ordenadas = sorted(correlaciones, key=lambda x: x[1])
-    nombres = [x[0] for x in corrs_ordenadas]
-    valores = [x[1] for x in corrs_ordenadas]
-    
-    plt.figure(figsize=(10, 8))
-    # Ponemos rojo si es negativo y verde si es positivo (mas visual)
-    colores = ['#ff4b4b' if v < 0 else '#4caf50' for v in valores]
-    
-    mis_barras = plt.barh(nombres, valores, color=colores)
-    plt.axvline(x=0, color='black') # Linea en el cero
-    
-    # Añado los numeros encima de las barras para que el profe los vea
-    for b in mis_barras:
-        ancho = b.get_width()
-        pos_x = ancho if ancho > 0 else ancho - 0.05
-        plt.text(pos_x, b.get_y() + b.get_height()/2, f'{ancho:.3f}', va='center', fontweight='bold')
-
-    plt.title('Influencia de las variables en la Productividad')
-    plt.tight_layout()
-    plt.savefig(PLOT_PATH)
-    plt.close()
-
-    # --- PARTE 3: PIPELINE DE TRANSFORMACIONES ---
-    # Cambio nombre a label para que Spark lo entienda mejor
+    df = spark.read.schema(schema).csv(INPUT_PATH, header=True)
     df = df.withColumnRenamed("productivity_score", "label")
     
-    # Me quedo con las 8 mejores segun la tabla de antes
-    correlaciones.sort(key=lambda x: abs(x[1]), reverse=True)
-    mis_features = [x[0] for x in correlaciones[:8]]
+    # Todas las features
+    todas = [c.name for c in df.schema.fields if isinstance(c.dataType, (FloatType, IntegerType)) 
+             and c.name not in ["student_id", "label"]]
+    
+    # Top 8 (por correlacion)
+    corrs = [(c, df.stat.corr(c, "label")) for c in todas]
+    corrs.sort(key=lambda x: abs(x[1]), reverse=True)
+    top_8 = [x[0] for x in corrs[:8]]
 
-    # Indexer y Encoder para el genero (categorias a numeros)
-    idx = StringIndexer(inputCol="gender", outputCol="gender_idx")
-    enc = OneHotEncoder(inputCol="gender_idx", outputCol="gender_vec")
+    print("\n" + "="*60)
+    print("      BENCHMARK DE RENDIMIENTO Y PRECISIÓN (R2)")
+    print("="*60)
     
-    # Junto todo en un vector
-    ass = VectorAssembler(inputCols=mis_features + ["gender_vec"], outputCol="features_sucias")
+    t1, r2_todas = benchmark_ml(df, todas, "USANDO TODO")
+    t2, r2_top = benchmark_ml(df, top_8, "USANDO SOLO MEJORES (Feature Selection)")
     
-    # Normalizacion con StandardScaler (lo que vimos en el pizarra)
-    esc = StandardScaler(inputCol="features_sucias", outputCol="features", withMean=True, withStd=True)
-    
-    # Monto el Pipeline completo
-    mi_pipeline = Pipeline(stages=[idx, enc, ass, esc])
-    df_modelo = mi_pipeline.fit(df).transform(df)
-    
-    # Guardo una muestra de los vectores para entregar el txt
-    muestra = df_modelo.select("label", "features").limit(10).collect()
-    with open(SAMPLE_PATH, "w", encoding="utf-8") as f:
-        f.write("MUESTRA DE LOS VECTORES PARA LA ENTREGA\n\n")
-        for r in muestra:
-            f.write(f"Productividad: {r['label']} | Vector: {r['features']}\n")
-    
-    print("Script terminado. Archivos generados correctamente.")
-    df_modelo.select("label", "features").show(5, truncate=False)
+    print("\n" + "="*60)
+    print("CONCLUSIÓN FINAL")
+    print("-" * 60)
+    print(f"Perdida de precision: {((r2_todas - r2_top)/r2_todas)*100:.2f}%")
+    print(f"Ganancia de velocidad: {((t1 - t2)/t1)*100:.2f}%")
+    print("="*60)
     
     spark.stop()
 
