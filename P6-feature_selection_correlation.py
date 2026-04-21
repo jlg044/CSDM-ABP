@@ -112,29 +112,35 @@ TARGET = "productivity_score"
 # FUNCIONES AUXILIARES
 # ─────────────────────────────────────────────────────────────────────────────
 
-def calculate_correlations_spark(spark, df_transformed, numeric_features):
+def calculate_correlations_spark(spark, df, numeric_features):
     """
-    Calcula correlación de Pearson usando Spark MLlib
+    Calcula correlación usando SQL para manejar NULLs
     """
-    print("\n[*] Calculando correlaciones con Spark MLlib...")
+    print("\n[*] Calculando correlaciones con Spark SQL...")
     
-    # Calcular matriz de correlación
-    correlation_matrix = Correlation.corr(df_transformed, "features_numeric").head()
-    
-    # Extraer correlaciones con target
-    corr_array = correlation_matrix[0].toArray()
-    
-    # El último índice es el target
-    target_idx = len(numeric_features)
-    correlations = corr_array[target_idx][:-1]
-    
-    # Crear dataframe de correlaciones
     corr_data = []
-    for i, feature in enumerate(numeric_features):
+    
+    # Para cada feature, calcular correlación con target ignorando nulos
+    for feature in numeric_features:
+        query = f"""
+        SELECT 
+            corr({feature}, {TARGET}) as correlation
+        FROM df_temp
+        WHERE {feature} IS NOT NULL AND {TARGET} IS NOT NULL
+        """
+        
+        df.createOrReplaceTempView("df_temp")
+        result = spark.sql(query).collect()
+        
+        if result and result[0][0] is not None:
+            corr_value = float(result[0][0])
+        else:
+            corr_value = 0.0
+        
         corr_data.append({
             'feature': feature,
-            'correlation': float(correlations[i]),
-            'abs_correlation': abs(float(correlations[i]))
+            'correlation': corr_value,
+            'abs_correlation': abs(corr_value)
         })
     
     # Convertir a Spark DataFrame y ordenar
@@ -280,24 +286,12 @@ def main():
         print("\nPrimeras 3 filas del dataset:")
         df.show(3, truncate=False)
         
-        # FILTRAR NULOS ANTES DE CALCULAR CORRELACIONES
-        print("\n[3] Filtrando valores nulos...")
-        df_no_null = df.dropna(subset=NUMERIC_FEATURES + [TARGET])
-        count_after = df_no_null.count()
-        print(f"✓ Registros después de filtrar nulos: {count_after} (removidos: {count - count_after})")
+        # TRANSFORMACIÓN INICIAL: Calcular correlaciones con SQL
+        print("\n[3] Preparando para calcular correlaciones...")
         
-        # TRANSFORMACIÓN INICIAL: VectorAssembler para calcular correlaciones
-        print("\n[4] Preparando features para calcular correlaciones...")
-        
-        assembler_numeric = VectorAssembler(
-            inputCols=NUMERIC_FEATURES + [TARGET], 
-            outputCol="features_numeric"
-        )
-        df_with_vectors = assembler_numeric.transform(df_no_null)
-        
-        # Calcular correlaciones con Spark MLlib
-        print("\n[5] Calculando correlaciones con Spark MLlib...")
-        corr_sorted = calculate_correlations_spark(spark, df_with_vectors, NUMERIC_FEATURES)
+        # Calcular correlaciones con Spark SQL
+        print("\n[4] Calculando correlaciones con Spark SQL...")
+        corr_sorted = calculate_correlations_spark(spark, df, NUMERIC_FEATURES)
         
         # Convertir a lista local para análisis
         corr_list = corr_sorted.collect()
@@ -313,7 +307,7 @@ def main():
             print(f"{item['feature']:<30} Correlación: {item['correlation']:>8.4f} | Abs: {item['abs_correlation']:>7.4f}")
         
         # Seleccionar TOP N
-        print(f"\n[6] Seleccionando TOP {TOP_N_FEATURES} features...")
+        print(f"\n[5] Seleccionando TOP {TOP_N_FEATURES} features...")
         top_corr_list = corr_list[:TOP_N_FEATURES]
         
         print(f"\n✓ TOP {TOP_N_FEATURES} Features Seleccionados:")
@@ -321,17 +315,17 @@ def main():
             print(f"  {idx}. {item['feature']:<30} Correlación: {item['correlation']:>8.4f}")
         
         # Generar visualizaciones
-        print("\n[7] Generando visualizaciones...")
+        print("\n[6] Generando visualizaciones...")
         plot_correlations(corr_list)
         plot_top_features(top_corr_list)
         
         # Generar reporte
-        print("\n[8] Generando reporte...")
+        print("\n[7] Generando reporte...")
         generate_report(corr_list, top_corr_list)
         print(f"✓ Reporte guardado en: {FEATURE_REPORT}")
         
         # TRANSFORMACIÓN FINAL: StringIndexer + OneHotEncoder + StandardScaler con features seleccionados
-        print("\n[9] Transformando y normalizando features seleccionados...")
+        print("\n[8] Transformando y normalizando features seleccionados...")
         
         selected_numeric_features = [item['feature'] for item in top_corr_list]
         
@@ -349,10 +343,13 @@ def main():
         
         # Pipeline final
         pipeline_final = Pipeline(stages=[indexer, encoder, assembler_selected, scaler])
-        df_final = pipeline_final.fit(df_no_null).transform(df_no_null)
+        df_final = pipeline_final.fit(df).transform(df)
+        
+        # Filtrar nulos SOLO en features seleccionados antes de guardar
+        df_final = df_final.dropna(subset=["features_scaled"])
         
         # Guardar datos transformados
-        print(f"\n[10] Guardando datos transformados...")
+        print(f"\n[9] Guardando datos transformados...")
         df_final.select("student_id", "productivity_score", "features_scaled").write \
             .parquet(TRANSFORMED_PARQUET, mode="overwrite")
         print(f"✓ Datos transformados guardados en: {TRANSFORMED_PARQUET}")
