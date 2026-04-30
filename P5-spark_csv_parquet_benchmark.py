@@ -19,7 +19,31 @@ from pyspark.sql.types import (
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(BASE_DIR, "student_productivity_distraction_dataset_20000.csv")
 OUT_DIR = os.path.join(BASE_DIR, "output", "p5_formal_benchmark")
+# Carpeta entregable con el Parquet optimizado (particionado por genero)
+ENTREGABLE_DIR = os.path.join(BASE_DIR, "P5_parquet_optimizado")
 os.makedirs(OUT_DIR, exist_ok=True)
+os.makedirs(ENTREGABLE_DIR, exist_ok=True)
+
+
+def get_dir_size(path):
+    """Calcula el tamaño total de una carpeta en bytes (recursivo)."""
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(path):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            if os.path.isfile(fp):
+                total += os.path.getsize(fp)
+    return total
+
+
+def format_size(size_bytes):
+    """Formatea bytes a KB o MB segun convenga."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.2f} KB"
+    else:
+        return f"{size_bytes / (1024 * 1024):.2f} MB"
 
 # Definimos el esquema a mano para que Spark no tenga que adivinarlo (va mas rapido)
 schema = StructType([
@@ -135,11 +159,104 @@ def main():
     _, t_bucket = timed(run_join)
     results.append({"name": "Bucketing (Join)", "time": t_bucket})
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # ENTREGABLE: Carpeta con Parquet optimizado particionado por genero
+    # ═══════════════════════════════════════════════════════════════════════
+    print("\n" + "=" * 70)
+    print("  GENERANDO ENTREGABLE: Parquet optimizado particionado")
+    print("=" * 70)
+    df_csv.write.mode("overwrite") \
+        .option("compression", "snappy") \
+        .partitionBy("gender") \
+        .parquet(ENTREGABLE_DIR)
+    print(f"  -> Guardado en: {ENTREGABLE_DIR}")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # COMPARATIVA DE TAMAÑOS: CSV vs Parquet
+    # ═══════════════════════════════════════════════════════════════════════
+    print("\n" + "=" * 70)
+    print("  COMPARATIVA DE TAMAÑOS DE ARCHIVO")
+    print("=" * 70)
+
+    csv_size = os.path.getsize(CSV_PATH)
+    parquet_plain_size = get_dir_size(path_plain)
+    parquet_snappy_size = get_dir_size(path_snappy)
+    parquet_part_size = get_dir_size(path_part)
+    entregable_size = get_dir_size(ENTREGABLE_DIR)
+
+    sizes = [
+        ("CSV Original", csv_size),
+        ("Parquet (Sin Compresion)", parquet_plain_size),
+        ("Parquet (Snappy)", parquet_snappy_size),
+        ("Parquet (Particionado)", parquet_part_size),
+        ("ENTREGABLE (Snappy+Part)", entregable_size),
+    ]
+
+    for nombre, tam in sizes:
+        ahorro = ((csv_size - tam) / csv_size) * 100 if tam < csv_size else 0
+        print(f"  {nombre:30s} -> {format_size(tam):>12s}  (ahorro: {ahorro:.1f}%)")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # INFORME DE RENDIMIENTO (archivo de texto)
+    # ═══════════════════════════════════════════════════════════════════════
+    informe_path = os.path.join(BASE_DIR, "P5_informe_rendimiento.txt")
+    with open(informe_path, "w", encoding="utf-8") as f:
+        f.write("=" * 70 + "\n")
+        f.write("  INFORME DE RENDIMIENTO - P5: CSV vs Parquet\n")
+        f.write("  Dataset: student_productivity_distraction_dataset_20000.csv\n")
+        f.write("  Registros: 20,000\n")
+        f.write("  Columna de particionado elegida: gender\n")
+        f.write("=" * 70 + "\n\n")
+
+        f.write("─" * 70 + "\n")
+        f.write("  1. COMPARATIVA DE TAMAÑOS\n")
+        f.write("─" * 70 + "\n")
+        for nombre, tam in sizes:
+            ahorro = ((csv_size - tam) / csv_size) * 100 if tam < csv_size else 0
+            f.write(f"  {nombre:30s} -> {format_size(tam):>12s}  (ahorro: {ahorro:.1f}%)\n")
+        f.write("\n")
+
+        f.write("─" * 70 + "\n")
+        f.write("  2. TIEMPOS DE EJECUCIÓN (Benchmark)\n")
+        f.write("─" * 70 + "\n")
+        for r in results:
+            f.write(f"  {r['name']:30s} -> {r['time']:.4f} s\n")
+        f.write("\n")
+
+        # Calculamos la mejora del mejor Parquet vs CSV
+        t_mejor_parquet = min(r['time'] for r in results if 'Parquet' in r['name'] or 'Particionado' in r['name'] or 'Snappy' in r['name'])
+        mejora = ((t_csv - t_mejor_parquet) / t_csv) * 100 if t_csv > 0 else 0
+
+        f.write("─" * 70 + "\n")
+        f.write("  3. CONCLUSIONES\n")
+        f.write("─" * 70 + "\n")
+        f.write(f"  - El CSV original ocupa {format_size(csv_size)}.\n")
+        f.write(f"  - El Parquet optimizado (Snappy + Particionado) ocupa {format_size(entregable_size)}.\n")
+        ahorro_final = ((csv_size - entregable_size) / csv_size) * 100
+        f.write(f"  - Ahorro de espacio: {ahorro_final:.1f}%\n")
+        f.write(f"  - Mejora de velocidad (mejor Parquet vs CSV): {mejora:.1f}%\n")
+        f.write(f"  - Se eligio 'gender' para particionar porque tiene baja cardinalidad\n")
+        f.write(f"    (solo 3 valores: Male, Female, Other), lo que permite un buen\n")
+        f.write(f"    Partition Pruning sin crear demasiadas carpetas.\n")
+        f.write("\n")
+        f.write("─" * 70 + "\n")
+        f.write("  4. ESTRUCTURA DEL ENTREGABLE\n")
+        f.write("─" * 70 + "\n")
+        f.write(f"  Carpeta: P5_parquet_optimizado/\n")
+        f.write(f"    ├── gender=Female/   (archivos .parquet con Snappy)\n")
+        f.write(f"    ├── gender=Male/     (archivos .parquet con Snappy)\n")
+        f.write(f"    └── gender=Other/    (archivos .parquet con Snappy)\n")
+        f.write("\n")
+        f.write("=" * 70 + "\n")
+
+    print(f"\n  Informe guardado en: {informe_path}")
+
     # --- Generamos la grafica para la presentacion ---
     print("\nCreando la grafica final...")
     names = [r['name'] for r in results]
     times = [r['time'] for r in results]
 
+    # --- Grafica 1: Tiempos de ejecucion ---
     plt.figure(figsize=(15, 9), facecolor='#1a1a2e')
     ax = plt.gca()
     ax.set_facecolor('#1a1a2e')
@@ -171,9 +288,41 @@ def main():
     # Guardamos la imagen final para el reporte
     save_path = os.path.join(OUT_DIR, "P5-grafica_final.png")
     plt.savefig(save_path, dpi=200, facecolor='#1a1a2e', bbox_inches='tight')
-    
+    plt.close()
+
+    # --- Grafica 2: Comparativa de tamaños de archivo ---
+    plt.figure(figsize=(12, 7), facecolor='#1a1a2e')
+    ax2 = plt.gca()
+    ax2.set_facecolor('#1a1a2e')
+
+    size_names = [s[0] for s in sizes]
+    size_vals_mb = [s[1] / (1024 * 1024) for s in sizes]
+    size_colors = ['#ff4d4d', '#3498db', '#2ecc71', '#9b59b6', '#f1c40f']
+
+    bars2 = plt.bar(size_names, size_vals_mb, color=size_colors, edgecolor='white', linewidth=1)
+
+    plt.title("COMPARATIVA DE TAMAÑOS: CSV vs PARQUET", fontsize=18, fontweight='bold', color='white', pad=25)
+    plt.ylabel("Megabytes (MB)", color='white', fontsize=12)
+    plt.xticks(rotation=25, ha='right', color='white', fontsize=11, fontweight='bold')
+    plt.yticks(color='white')
+    plt.grid(axis='y', linestyle='--', alpha=0.1, color='white')
+
+    for bar in bars2:
+        height = bar.get_height()
+        plt.text(bar.get_x() + bar.get_width()/2, height + 0.01,
+                 f'{height:.2f} MB', ha='center', va='bottom',
+                 fontsize=10, fontweight='bold', color='white')
+
+    plt.subplots_adjust(bottom=0.25, top=0.88)
+    save_path2 = os.path.join(OUT_DIR, "P5-grafica_tamanos.png")
+    plt.savefig(save_path2, dpi=200, facecolor='#1a1a2e', bbox_inches='tight')
+    plt.close()
+
     print(f"\nProceso terminado.")
-    print(f"La grafica la tienes aqui: {save_path}")
+    print(f"Grafica de tiempos:  {save_path}")
+    print(f"Grafica de tamanos:  {save_path2}")
+    print(f"Informe:             {informe_path}")
+    print(f"Parquet entregable:  {ENTREGABLE_DIR}")
     
     spark.stop()
 

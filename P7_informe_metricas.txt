@@ -1,0 +1,38 @@
+=============================================================================
+      REPORTE DE MÉTRICAS DE MODELOS DE PREDICCIÓN (FASE P7)
+=============================================================================
+
+Para esta fase de Inteligencia Artificial, el objetivo era predecir la variable "productivity_score" (rendimiento del estudiante) basándonos en sus 6 características más importantes (horas de estudio, porcentaje de asistencia, horas de sueño, nivel de estrés, etc.).
+
+Hemos separado el dataset en un 80% para entrenar y un 20% exclusivo para poner a prueba (Test) a los algoritmos. Durante el entrenamiento, usamos Validación Cruzada (Cross-Validation) de 5 pliegues para asegurarnos de que los modelos no se aprendieran los datos de memoria.
+
+A continuación, mostramos los resultados del examen final (en el conjunto de Test invisible para el modelo) ordenados de mejor a peor:
+
+1. Regresión Lineal (GANADOR)
+   - R² (Exactitud): 1.0000
+   - RMSE (Error medio): 0.0029
+   - MAE (Error absoluto): 0.0025
+   Análisis: Los datos presentan una relación tan puramente lineal que la fórmula matemática tradicional consigue una predicción casi exacta. Se equivoca en apenas 0.002 puntos de productividad.
+
+2. Gradient Boosting
+   - R² (Exactitud): 0.9970
+   - RMSE (Error medio): 0.8791
+   - MAE (Error absoluto): 0.6939
+   Análisis: Un modelo "ensemble" muy robusto que logra explicar casi el 99.7% del comportamiento de los alumnos. El error es de menos de 1 punto de diferencia sobre la realidad.
+
+3. Random Forest (Bosques Aleatorios)
+   - R² (Exactitud): 0.9830
+   - RMSE (Error medio): 2.0943
+   - MAE (Error absoluto): 1.6373
+   Análisis: Sigue teniendo un rendimiento excelente. Al promediar muchísimos árboles distintos se asegura de no sobreajustarse a casos raros.
+
+4. Árbol de Decisión Simple
+   - R² (Exactitud): 0.7948
+   - RMSE (Error medio): 7.2698
+   - MAE (Error absoluto): 5.8397
+   Análisis: Es el que peor rendimiento tiene (79%). Esto es normal ya que un solo árbol de decisión suele ser muy rígido y funciona peor con datos continuos en comparación a los "ensambles" (Random Forest / Boosting).
+
+-----------------------------------------------------------------------------
+CONCLUSIÓN Y PERSISTENCIA
+-----------------------------------------------------------------------------
+A la vista de estas métricas, el modelo más fiable para la universidad es la Regresión Lineal. Todos los modelos han sido guardados permanentemente en el disco de nuestro sistema (en la carpeta "modelos_entrenados") usando la librería "joblib" para que, el día de mañana, podamos hacer predicciones en tiempo real sobre nuevos estudiantes sin perder tiempo reentrenando los algoritmos.
