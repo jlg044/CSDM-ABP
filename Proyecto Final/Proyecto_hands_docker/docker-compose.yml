@@ -1,0 +1,72 @@
+services:
+
+  # ── Nodo maestro del cluster Spark ────────────────────────────────────────
+  spark-master:
+    build: .
+    container_name: spark-master
+    ports:
+      - "8080:8080"   # Web UI: http://localhost:8080
+      - "7077:7077"   # Puerto del cluster
+    command: bash /app/scripts/start-master.sh
+
+  # ── Worker 1 ───────────────────────────────────────────────────────────────
+  spark-worker-1:
+    build: .
+    container_name: spark-worker-1
+    depends_on:
+      - spark-master
+    command: bash /app/scripts/start-worker.sh
+
+  # ── Worker 2 ───────────────────────────────────────────────────────────────
+  spark-worker-2:
+    build: .
+    container_name: spark-worker-2
+    depends_on:
+      - spark-master
+    command: bash /app/scripts/start-worker.sh
+
+  # ── Driver: preprocesado + entrenamiento ──────────────────────────────────
+  cnn-trainer:
+    build: .
+    container_name: cnn-hand-trainer
+    depends_on:
+      - spark-worker-1
+      - spark-worker-2
+    volumes:
+      - "../Imagenes Normalizadas:/app/data:ro"
+      - "./models:/app/models"
+    environment:
+      - TF_CPP_MIN_LOG_LEVEL=2
+      - PYTHONUNBUFFERED=1
+      - SPARK_MASTER=spark://spark-master:7077
+    command: >-
+      bash -c "echo 'Esperando al cluster (25s)...' && sleep 25 &&
+      echo '====== Paso 1: Preprocesado PySpark (cluster 1+2) ======' &&
+      python src/01_preprocess.py &&
+      echo '====== Paso 2: Entrenamiento CNN ======' &&
+      python src/02_train.py &&
+      echo '====== Paso 3: Evaluacion ======' &&
+      python src/03_evaluate.py &&
+      echo 'Pipeline completado.'"
+
+  # ── Servidor de inferencia en tiempo real ─────────────────────────────────
+  inference-server:
+    build: .
+    container_name: inference-server
+    depends_on:
+      - cnn-trainer
+    ports:
+      - "8000:8000"   # API REST: http://localhost:8000
+    volumes:
+      - "./models:/app/models:ro"   # solo lectura: consume el modelo entrenado
+    environment:
+      - PYTHONUNBUFFERED=1
+      - MODEL_PATH=/app/models/best_model.keras
+    command: >-
+      bash -c "
+      echo 'Esperando a que el modelo esté disponible...' &&
+      until [ -f /app/models/best_model.keras ]; do sleep 5; done &&
+      echo 'Modelo encontrado. Arrancando servidor...' &&
+      uvicorn src.04_server:app --host 0.0.0.0 --port 8000"
+
+
